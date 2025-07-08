@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package proto;
+
+option go_package = "github.com/ShreyamKundu/peernet/proto";
+
+// The Peer service definition for chunk transfer.
+service PeerService {
+  // Requests a file chunk from a peer.
+  rpc DownloadChunk(ChunkRequest) returns (ChunkResponse);
+}
+
+// The request message containing chunk details.
+message ChunkRequest {
+  string file_hash = 1;
+  int32 chunk_index = 2;
+}
+
+// The response message containing the chunk data.
+message ChunkResponse {
+  // The raw (and encrypted) bytes of the file chunk.
+  bytes chunk_data = 1;
+}
