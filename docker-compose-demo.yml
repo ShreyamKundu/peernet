@@ -1,0 +1,84 @@
+# peernet/docker-compose.yml
+# This file defines the services for local development and demonstration.
+
+# Removed 'version' attribute to silence warning.
+
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: peernet-db
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: peernet
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d peernet"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  tracker:
+    build:
+      context: .
+      dockerfile: tracker/Dockerfile
+    container_name: peernet-tracker
+    depends_on:
+      db:
+        condition: service_healthy # Ensure DB is ready before starting tracker
+    ports:
+      - "8080:8080" # Expose tracker API publicly on localhost
+    environment:
+      - DATABASE_URL=postgres://user:password@db:5432/peernet?sslmode=disable
+      - TRACKER_PORT=8080
+      - JWT_SECRET=a_very_secret_key
+    healthcheck:
+      # Check if the tracker's health endpoint responds
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Peer 1 service
+  peer1:
+    build:
+      context: .
+      dockerfile: peer/Dockerfile
+    container_name: peernet-peer1
+    depends_on:
+      tracker:
+        condition: service_healthy
+    # Keep the container running indefinitely so we can `docker exec` into it
+    command: sleep infinity
+    volumes:
+      - ./shared_files/peer1/data:/home/appuser/data
+    # Expose peer1's gRPC port
+    ports:
+      - "50051:50051"
+
+  # Peer 2 service
+  peer2:
+    build:
+      context: .
+      dockerfile: peer/Dockerfile
+    container_name: peernet-peer2
+    depends_on:
+      tracker:
+        condition: service_healthy
+    # Keep the container running indefinitely so we can `docker exec` into it
+    command: sleep infinity
+    volumes:
+      - ./shared_files/peer2/downloads:/home/appuser/downloads
+    # Expose peer2's gRPC port (even if only downloading, good for future sharing)
+    ports:
+      - "50052:50052"
+
+volumes:
+  postgres_data:
+
+networks:
+  default:
+    driver: bridge

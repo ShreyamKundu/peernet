@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	processingInterval = 30 * time.Minute // How often to process events
+	processingInterval = 10 * time.Second // How often to process events
 	scoreForSuccess    = 0.1
 	scoreForFailure    = -0.2
 	tokenForSuccess    = 5

@@ -40,5 +40,5 @@ RUN mkdir data && chown appuser:appgroup data
 RUN chown appuser:appgroup peer-client
 USER appuser
 
-# Set the entrypoint
-ENTRYPOINT ["./peer-client"]
+# # Set the entrypoint
+# ENTRYPOINT ["./peer-client"]
