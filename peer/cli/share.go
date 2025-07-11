@@ -25,6 +25,7 @@ var shareCmd = &cobra.Command{
 			log.Fatalf("File does not exist: %s", filePath)
 		}
 
+		// Chunk the file. `chunks` here still contains the data, which is fine for announcement.
 		chunks, fileHash, err := file.ChunkFile(filePath)
 		if err != nil {
 			log.Fatalf("Failed to chunk file: %v", err)
@@ -32,15 +33,21 @@ var shareCmd = &cobra.Command{
 		log.Printf("File '%s' chunked successfully. File Hash: %s", filePath, fileHash)
 
 		client := p2p.NewTrackerClient(cfg.TrackerURL, cfg.AuthToken)
+		// Announce each chunk to the tracker
 		for i := range chunks {
-			if err := client.Announce(filePath, fileHash, len(chunks), i); err != nil {
+			if err := client.Announce(filePath, fileHash, len(chunks), i, chunks[i].Hash); err != nil {
 				log.Printf("Failed to announce chunk %d: %v", i, err)
 			}
 		}
 		log.Printf("Announced all %d chunks to tracker.", len(chunks))
 
 		grpcPort, _ := cmd.Flags().GetString("port")
-		grpcServer := p2p.NewGRPCServer(filePath, chunks)
+
+		// IMPORTANT: The gRPC server is now initialized with the file path and chunk metadata,
+		// but it will read the actual chunk data from disk on demand.
+		// Note: For a multi-file sharing peer, this `NewGRPCServer` call would need to
+		// manage multiple shared files. For this demo, it assumes one file at a time.
+		grpcServer := p2p.NewGRPCServer(filePath, fileHash, len(chunks), chunks)
 		log.Printf("Starting gRPC server to serve file chunks on port %s...", grpcPort)
 		if err := grpcServer.Start(grpcPort); err != nil {
 			log.Fatalf("Failed to start gRPC server: %v", err)

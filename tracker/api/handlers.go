@@ -21,6 +21,7 @@ type fileAnnouncementRequest struct {
 	FileName    string `json:"file_name" binding:"required"`
 	TotalChunks int    `json:"total_chunks" binding:"required"`
 	ChunkIndex  int    `json:"chunk_index"`
+	ChunkHash   string `json:"chunk_hash" binding:"required"` // ADDED: Required for chunk verification
 }
 
 type feedbackRequest struct {
@@ -92,23 +93,22 @@ func announceFile(db *sql.DB) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
 			return
 		}
+		defer tx.Rollback() // Rollback on error
 
 		// Insert or update file info
 		_, err = tx.Exec(`
-			INSERT INTO files (file_hash, file_name, total_chunks) VALUES ($1, $2, $3)
-			ON CONFLICT (file_hash) DO NOTHING;`, req.FileHash, req.FileName, req.TotalChunks)
+            INSERT INTO files (file_hash, file_name, total_chunks) VALUES ($1, $2, $3)
+            ON CONFLICT (file_hash) DO NOTHING;`, req.FileHash, req.FileName, req.TotalChunks)
 		if err != nil {
-			tx.Rollback()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to announce file"})
 			return
 		}
 
-		// Insert chunk-peer mapping
+		// Insert chunk-peer mapping with chunk_hash
 		_, err = tx.Exec(`
-			INSERT INTO file_chunk_peers (file_hash, chunk_index, peer_id)
-			VALUES ($1, $2, $3) ON CONFLICT DO NOTHING;`, req.FileHash, req.ChunkIndex, peerID.(string))
+            INSERT INTO file_chunk_peers (file_hash, chunk_index, peer_id, chunk_hash)
+            VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING;`, req.FileHash, req.ChunkIndex, peerID.(string), req.ChunkHash) // ADDED req.ChunkHash
 		if err != nil {
-			tx.Rollback()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to announce chunk"})
 			return
 		}
@@ -122,38 +122,55 @@ func announceFile(db *sql.DB) gin.HandlerFunc {
 	}
 }
 
+// PeerInfo holds information about a peer that has a chunk.
+type PeerInfo struct {
+	ID              string  `json:"id"`
+	Address         string  `json:"address"`
+	ReputationScore float64 `json:"reputation_score"`
+}
+
+// ChunkLookupInfo holds information for a specific chunk, including its hash and available peers.
+type ChunkLookupInfo struct {
+	ChunkHash string     `json:"chunk_hash"`
+	Peers     []PeerInfo `json:"peers"`
+}
+
 func lookupFile(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		fileHash := c.Param("fileHash")
 		rows, err := db.Query(`
-			SELECT p.id, p.address, fcp.chunk_index, p.reputation_score
-			FROM file_chunk_peers fcp
-			JOIN peers p ON fcp.peer_id = p.id
-			WHERE fcp.file_hash = $1
-			ORDER BY p.reputation_score DESC, p.last_seen DESC;
-		`, fileHash)
+            SELECT p.id, p.address, fcp.chunk_index, p.reputation_score, fcp.chunk_hash -- ADDED fcp.chunk_hash
+            FROM file_chunk_peers fcp
+            JOIN peers p ON fcp.peer_id = p.id
+            WHERE fcp.file_hash = $1
+            ORDER BY fcp.chunk_index ASC, p.reputation_score DESC, p.last_seen DESC; -- Order by chunk_index first for consistency
+        `, fileHash)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database query failed"})
 			return
 		}
 		defer rows.Close()
 
-		type PeerInfo struct {
-			ID              string  `json:"id"`
-			Address         string  `json:"address"`
-			ReputationScore float64 `json:"reputation_score"`
-		}
-		// map[chunk_index] -> []PeerInfo
-		chunkPeers := make(map[int][]PeerInfo)
+		// map[chunk_index] -> ChunkLookupInfo
+		chunkPeers := make(map[int]ChunkLookupInfo)
 
 		for rows.Next() {
-			var peerID, address string
+			var peerID, address, chunkHash string // ADDED chunkHash
 			var chunkIndex int
 			var reputationScore float64
-			if err := rows.Scan(&peerID, &address, &chunkIndex, &reputationScore); err != nil {
+			if err := rows.Scan(&peerID, &address, &chunkIndex, &reputationScore, &chunkHash); err != nil { // ADDED &chunkHash
+				log.Printf("Error scanning lookup row: %v", err)
 				continue
 			}
-			chunkPeers[chunkIndex] = append(chunkPeers[chunkIndex], PeerInfo{ID: peerID, Address: address, ReputationScore: reputationScore})
+
+			// Get or create the ChunkLookupInfo for this chunkIndex
+			chunkInfo := chunkPeers[chunkIndex]
+			if chunkInfo.Peers == nil { // Initialize if first peer for this chunk
+				chunkInfo.Peers = make([]PeerInfo, 0)
+				chunkInfo.ChunkHash = chunkHash // Set the chunk hash for this chunk index
+			}
+			chunkInfo.Peers = append(chunkInfo.Peers, PeerInfo{ID: peerID, Address: address, ReputationScore: reputationScore})
+			chunkPeers[chunkIndex] = chunkInfo
 		}
 
 		c.JSON(http.StatusOK, gin.H{"chunks": chunkPeers})
@@ -170,9 +187,9 @@ func submitFeedback(db *sql.DB) gin.HandlerFunc {
 		reporterPeerID, _ := c.Get("peerID")
 
 		_, err := db.Exec(`
-			INSERT INTO reputation_events (reporter_peer_id, target_peer_id, file_hash, chunk_index, event_type)
-			VALUES ($1, $2, $3, $4, $5);
-		`, reporterPeerID, req.TargetPeerID, req.FileHash, req.ChunkIndex, req.EventType)
+            INSERT INTO reputation_events (reporter_peer_id, target_peer_id, file_hash, chunk_index, event_type)
+            VALUES ($1, $2, $3, $4, $5);
+        `, reporterPeerID, req.TargetPeerID, req.FileHash, req.ChunkIndex, req.EventType)
 
 		if err != nil {
 			log.Printf("Failed to record feedback: %v", err)
