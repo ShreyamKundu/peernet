@@ -36,16 +36,14 @@ var downloadCmd = &cobra.Command{
 		}
 
 		downloader := p2p.NewDownloader(trackerClient)
-		fileData, err := downloader.DownloadFile(fileHash, lookupResult)
-		if err != nil {
+		outputPath := filepath.Join(outputDir, fileHash+".download") // Define the final output path
+
+		// Pass the outputPath to the DownloadFile function
+		if err := downloader.DownloadFile(fileHash, lookupResult, outputPath); err != nil {
 			log.Fatalf("Failed to download file: %v", err)
 		}
 
-		outputPath := filepath.Join(outputDir, fileHash+".download")
-		if err := os.WriteFile(outputPath, fileData, 0644); err != nil {
-			log.Fatalf("Failed to write downloaded file: %v", err)
-		}
-
+		// The file is already written to disk by DownloadFile, no need for os.WriteFile here.
 		log.Printf("✅ File successfully downloaded to %s", outputPath)
 	},
 }

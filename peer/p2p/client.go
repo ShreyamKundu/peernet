@@ -8,11 +8,12 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os" // Added for file operations
 	"path/filepath"
 	"sync"
 	"time"
 
-	"github.com/ShreyamKundu/peernet/peer/file"
+	"github.com/ShreyamKundu/peernet/peer/file" // Import the file package for VerifyChunk and WriteChunkAtOffset
 	pb "github.com/ShreyamKundu/peernet/proto"
 
 	"google.golang.org/grpc"
@@ -41,7 +42,7 @@ type ChunkLookupInfo struct {
 
 // LookupResult is the structure of the response from the /lookup endpoint.
 type LookupResult struct {
-	Chunks map[int]ChunkLookupInfo `json:"chunks"` // CHANGED: Now maps chunk index to ChunkLookupInfo
+	Chunks map[int]ChunkLookupInfo `json:"chunks"` // Now maps chunk index to ChunkLookupInfo
 }
 
 // NewTrackerClient creates a new client for the tracker.
@@ -61,7 +62,7 @@ func (c *TrackerClient) Announce(filePath, fileHash string, totalChunks, chunkIn
 		"file_name":    filepath.Base(filePath),
 		"total_chunks": totalChunks,
 		"chunk_index":  chunkIndex,
-		"chunk_hash":   chunkHash, // ADDED: Send the chunk hash to the tracker
+		"chunk_hash":   chunkHash, // Send the chunk hash to the tracker
 	}
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequest("POST", c.baseURL+"/api/v1/files/announce", bytes.NewBuffer(body))
@@ -149,17 +150,37 @@ func NewDownloader(client *TrackerClient) *Downloader {
 	return &Downloader{trackerClient: client}
 }
 
-// DownloadFile coordinates the entire file download process, now with chunk verification.
-func (d *Downloader) DownloadFile(fileHash string, lookupResult *LookupResult) ([]byte, error) {
+// DownloadFile coordinates the entire file download process, writing chunks directly to disk.
+func (d *Downloader) DownloadFile(fileHash string, lookupResult *LookupResult, outputPath string) error {
 	totalChunks := len(lookupResult.Chunks)
 	if totalChunks == 0 {
-		return nil, fmt.Errorf("no chunks available for file")
+		return fmt.Errorf("no chunks available for file")
 	}
 
-	// Use a map to store chunks as they are downloaded, to handle out-of-order completion
-	downloadedChunks := make(map[int][]byte)
+	// Determine the total expected file size. This assumes all chunks are ChunkSize,
+	// except possibly the last one. For a more robust solution, the tracker should
+	// provide the total file size.
+	// For now, we'll assume total_chunks * ChunkSize for allocation.
+	// This might over-allocate if the last chunk is smaller, but ensures space.
+	expectedFileSize := int64(totalChunks) * file.ChunkSize
+
+	// Create/truncate the output file to its expected size before starting downloads.
+	// This ensures we have enough space and handle partial previous downloads.
+	outputFile, err := os.OpenFile(outputPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to create/truncate output file %s: %v", outputPath, err)
+	}
+	// Pre-allocate space if possible (optional, but good for performance on some filesystems)
+	if err := outputFile.Truncate(expectedFileSize); err != nil {
+		log.Printf("Warning: Failed to pre-allocate file size for %s: %v", outputPath, err)
+	}
+	outputFile.Close() // Close immediately as WriteChunkAtOffset will open/close for each write
+
+	// Use a map to track which chunks have been successfully written to disk.
+	// We no longer store the actual byte data here.
+	downloadedChunksStatus := make(map[int]bool)
 	var wg sync.WaitGroup
-	var mu sync.Mutex // Mutex to protect access to downloadedChunks and errs channel
+	var mu sync.Mutex // Mutex to protect access to downloadedChunksStatus and errs channel
 	errs := make(chan error, totalChunks)
 
 	for i := 0; i < totalChunks; i++ {
@@ -187,6 +208,7 @@ func (d *Downloader) DownloadFile(fileHash string, lookupResult *LookupResult) (
 					continue
 				}
 
+				// Chunk hash verification
 				if !file.VerifyChunk(data, expectedChunkHash) {
 					log.Printf("Downloaded chunk %d from %s failed hash verification. Expected %s, got data with hash %s. Trying next peer.",
 						chunkIndex, peer.Address, expectedChunkHash, file.CalculateChunkHash(data))
@@ -194,16 +216,24 @@ func (d *Downloader) DownloadFile(fileHash string, lookupResult *LookupResult) (
 					continue // Try next peer if verification fails
 				}
 
+				// --- IMPORTANT: Write chunk directly to disk here! ---
+				if err := file.WriteChunkAtOffset(outputPath, data, chunkIndex); err != nil {
+					log.Printf("Failed to write chunk %d to disk: %v. Trying next peer.", chunkIndex, err)
+					d.trackerClient.SubmitFeedback(peer.ID, fileHash, chunkIndex, "FAILED_UPLOAD")
+					continue // If disk write fails, try another peer (or report critical error)
+				}
+				// --- END IMPORTANT ---
+
 				mu.Lock()
-				downloadedChunks[chunkIndex] = data
+				downloadedChunksStatus[chunkIndex] = true // Mark as successfully written
 				mu.Unlock()
 
-				log.Printf("Successfully downloaded and verified chunk %d from peer %s", chunkIndex, peer.ID)
+				log.Printf("Successfully downloaded, verified, and wrote chunk %d from peer %s", chunkIndex, peer.ID)
 				d.trackerClient.SubmitFeedback(peer.ID, fileHash, chunkIndex, "SUCCESS_UPLOAD")
 				return // Success, exit the loop for this chunk
 			}
 			mu.Lock()
-			errs <- fmt.Errorf("failed to download and verify chunk %d from any peer", chunkIndex)
+			errs <- fmt.Errorf("failed to download, verify, and write chunk %d from any peer", chunkIndex)
 			mu.Unlock()
 		}(i)
 	}
@@ -214,23 +244,21 @@ func (d *Downloader) DownloadFile(fileHash string, lookupResult *LookupResult) (
 	// Check for any errors that occurred during concurrent downloads
 	for err := range errs {
 		if err != nil {
-			return nil, err // Return on the first error
+			return err // Return on the first error
 		}
 	}
 
-	// Reassemble the file from chunks in correct order
-	var fileBuffer bytes.Buffer
+	// Final check to ensure all chunks were written
 	for i := 0; i < totalChunks; i++ {
-		mu.Lock() // Protect access to downloadedChunks map
-		chunk, ok := downloadedChunks[i]
+		mu.Lock()
+		written, ok := downloadedChunksStatus[i]
 		mu.Unlock()
-		if !ok || chunk == nil {
-			return nil, fmt.Errorf("missing chunk %d after download completion", i)
+		if !ok || !written {
+			return fmt.Errorf("missing chunk %d after download completion (not written to disk)", i)
 		}
-		fileBuffer.Write(chunk)
 	}
 
-	return fileBuffer.Bytes(), nil
+	return nil // All chunks downloaded, verified, and written
 }
 
 // downloadChunkFromPeer connects to a single peer via gRPC and downloads one chunk.
