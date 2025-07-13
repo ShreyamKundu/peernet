@@ -15,9 +15,10 @@ var downloadCmd = &cobra.Command{
 	Short: "Download a file from the network",
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		cfg, err := config.Load()
+		// Pass the global configPath variable to Load
+		cfg, err := config.Load(configPath)
 		if err != nil || cfg.AuthToken == "" {
-			log.Fatal("Configuration not found. Please run 'peernet register' first.")
+			log.Fatal("Configuration not found. Please run 'peernet register' first or specify --config.")
 		}
 
 		fileHash := args[0]
@@ -36,14 +37,12 @@ var downloadCmd = &cobra.Command{
 		}
 
 		downloader := p2p.NewDownloader(trackerClient)
-		outputPath := filepath.Join(outputDir, fileHash+".download") // Define the final output path
+		outputPath := filepath.Join(outputDir, fileHash+".download")
 
-		// Pass the outputPath to the DownloadFile function
 		if err := downloader.DownloadFile(fileHash, lookupResult, outputPath); err != nil {
 			log.Fatalf("Failed to download file: %v", err)
 		}
 
-		// The file is already written to disk by DownloadFile, no need for os.WriteFile here.
 		log.Printf("✅ File successfully downloaded to %s", outputPath)
 	},
 }

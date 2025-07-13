@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 
@@ -32,7 +33,8 @@ var registerCmd = &cobra.Command{
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusCreated {
-			log.Fatalf("Registration failed with status: %s", resp.Status)
+			responseBody, _ := io.ReadAll(resp.Body)
+			log.Fatalf("Registration failed with status: %s, body: %s", resp.Status, string(responseBody))
 		}
 
 		var result map[string]string
@@ -43,11 +45,12 @@ var registerCmd = &cobra.Command{
 			TrackerURL: trackerURL,
 			AuthToken:  token,
 		}
-		if err := cfg.Save(); err != nil {
+		// Pass the global configPath variable to Save
+		if err := cfg.Save(configPath); err != nil {
 			log.Fatalf("Failed to save configuration: %v", err)
 		}
 
-		fmt.Printf("✅ Successfully registered! Configuration saved.\n")
+		fmt.Printf("✅ Successfully registered! Configuration saved to %s.\n", configPathOrDefault(configPath))
 	},
 }
 
@@ -56,4 +59,13 @@ func init() {
 	registerCmd.Flags().String("address", "", "This peer's public IP and port (e.g., 123.45.67.89:50051)")
 	registerCmd.Flags().String("password", "", "A password for your peer account")
 	rootCmd.AddCommand(registerCmd)
+}
+
+// Helper to display the correct config path in messages
+func configPathOrDefault(path string) string {
+	if path != "" {
+		return path
+	}
+	defaultPath, _ := config.DefaultConfigFilePath() // Assuming this function exists and works
+	return defaultPath
 }
