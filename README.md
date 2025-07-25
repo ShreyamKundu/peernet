@@ -63,42 +63,9 @@ PeerNet is comprised of two primary, independently containerized services:
 * **Bcrypt:** For secure password hashing.
 
 
-## 🚀 Getting Started
-
-To run the **PeerNet demo**, you'll need **Docker** and **Docker Compose** installed on your system.
-
-### 1. Clone the repository
-```bash
-git clone https://github.com/ShreyamKundu/peernet.git
-cd peernet
-```
-### 2. Run the demo script
-
-The `run_demo.sh` script automates the entire process:
-
-- Cleans up old containers
-- Prepares sample files
-- Builds and starts all services
-- Registers peers
-- Shares a file from Peer 1
-- Downloads it with Peer 2
-
-Run:
-
-```bash
-./run_demo.sh
-```
-Follow the on-screen narrative in your terminal to see PeerNet in action!
-
-
 ## **📺 Demo Video**
 
 A comprehensive demo video showcasing PeerNet's functionality and architecture will be embedded here soon.
-
-
-## **📚 Setup Guides**
-
-Detailed setup guides for local development, advanced configurations, and troubleshooting will be provided here.
 
 
 ## **💡 Future Improvements (Potential Areas)**
